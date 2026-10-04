@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>05</title>
+<style>
+  /* instrument-design-05 — the specimen (docs/01, docs/02). Silent: no file in this folder opens a sound. */
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; }
+  body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+         font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #f0ebe1; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; touch-action: none; }
+  /* The top: CAMERA · MUSIC, two words, no box (docs/01 §4); PLAY, later STOP, at the right (docs/02 §3). */
+  .top { position: fixed; top: calc(env(safe-area-inset-top) + 14px); font: 600 13px/1 "Helvetica Neue", Helvetica, Arial, sans-serif;
+         letter-spacing: .14em; opacity: 0; pointer-events: none; transition: opacity .9s ease; }
+  .top.on { opacity: 1; pointer-events: auto; }
+  #modes { left: 0; right: 0; text-align: center; }
+  #modes button, #play { background: none; border: 0; padding: 10px 6px; margin: 0; font: inherit; letter-spacing: inherit;
+         color: rgba(240, 235, 225, .32); cursor: pointer; transition: color .4s ease, text-shadow .4s ease; }
+  #modes button.lit { color: #f0ebe1; text-shadow: 0 0 10px rgba(255, 220, 170, .45); }
+  #modes .dot { color: rgba(240, 235, 225, .32); padding: 0 4px; }
+  #play { right: calc(env(safe-area-inset-right) + 10px); color: #f0ebe1; text-shadow: 0 0 12px rgba(120, 255, 160, .55); }
+  #play.top { position: fixed; padding: 10px 10px; }
+  /* The gestures that work now, top left — bare words, no box (Marco, 2026-10-04: *"we use the top left to show the
+     gestures that are current"*). A line lights while its gesture is used. */
+  #guide { position: fixed; left: calc(env(safe-area-inset-left) + 14px); top: calc(env(safe-area-inset-top) + 50px);
+           font: 500 11px/1.75 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: .06em; pointer-events: none;
+           color: rgba(240, 235, 225, .66); opacity: 0; transition: opacity .6s ease; white-space: nowrap;
+           text-shadow: 0 0 8px rgba(0, 0, 0, 1), 0 0 3px rgba(0, 0, 0, 1), 0 0 1px rgba(0, 0, 0, 1); }
+  #guide.on { opacity: 1; }
+  #guide div { transition: color .25s ease, text-shadow .25s ease; }
+  #guide div.lit { color: #f0ebe1; text-shadow: 0 0 10px rgba(255, 220, 170, .6), 0 0 2px rgba(0, 0, 0, .9); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="modes" class="top"><button id="mCamera">CAMERA</button><span class="dot">·</span><button id="mMusic" class="lit">MUSIC</button></div>
+<button id="play" class="top">PLAY</button>
+<div id="guide"></div>
+<script type="module">
+import { createScore } from './score.js';
+import * as M from './music.js';
+import * as audio from './audio.js';
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('c');
+const score = createScore({ canvas });
+const fit = () => score.resize(window.innerWidth, window.innerHeight);
+window.addEventListener('resize', fit); fit();
+// No page zoom on a pinch or a double-tap: the fingers belong to the instrument.
+for (const ev of ['gesturestart', 'gesturechange', 'dblclick']) document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+
+// ─── The state ──────────────────────────────────────────────────────────────────────────────────
+const SPB = 60 / M.BPM, LEAD = 2;                 // seconds a beat; the lead-in's beats (as 04)
+let bootAt = null, clockT = performance.now() / 1000;   // seconds; the standby light's tap
+let started = false, playing = false, lead = 1, now = 0, playAt = 0;   // the music's clock: the real one, from PLAY
+let mode = 'music', selected = -1, shot = 0, shotNext = null;
+const colour = new Array(M.NP).fill(0.6), drive = new Array(M.NP).fill(0), space = new Array(M.NP).fill(0.25), tension = new Array(M.NP).fill(0);
+const echo = new Array(M.NP).fill(0);
+const tensionHeld = new Array(M.NP).fill(false), tensionDropAt = new Array(M.NP).fill(null);
+let tilt = { x: 0, y: 0 }, tilt0 = null;
+
+// A fresh song, a fresh hand: the dub chord with its echo in a big space, the pad in a wide one (docs/02 §3).
+function resetHand() {
+  colour.fill(0.6); drive.fill(0); space.fill(0.25); echo.fill(0); tension.fill(0); tensionHeld.fill(false); tensionDropAt.fill(null);
+  echo[M.CHORDS_PART] = 0.55; space[M.CHORDS_PART] = 0.6; space[6] = 0.45;
+}
+// What is heard and seen: the hand, inside the song's own colour (dark at the start, opening over the build), and the
+// swell's rise on the chords and the pad.
+const colourHeard = new Array(M.NP).fill(0.6), tensionHeard = new Array(M.NP).fill(0);
+function heardHand() {
+  const open = playing ? M.openAt(now) : 1, sw = playing ? M.swellAt(now) : 0;
+  for (let p = 0; p < M.NP; p++) {
+    colourHeard[p] = colour[p] * (0.45 + 0.55 * open);
+    tensionHeard[p] = Math.max(tension[p], p === 5 || p === 6 ? 0.85 * sw : 0);
+  }
+  return { colour: colourHeard, drive, echo, space, tension: tensionHeard };
+}
+resetHand();
+const boot = () => (bootAt == null ? null : clockT - bootAt);
+const ready = () => boot() != null && boot() >= 3.5;
+const nowBeat = () => now;
+const clamp = (x) => Math.max(0, Math.min(1, x));
+// What a gesture acts on: the selected part, or every part from the whole score (docs/01 §6.1).
+const targets = () => (selected >= 0 ? [selected] : [...Array(M.NP).keys()]);
+
+// ─── The top ────────────────────────────────────────────────────────────────────────────────────
+function setMode(m) {
+  mode = m;
+  $('mCamera').classList.toggle('lit', m === 'camera'); $('mMusic').classList.toggle('lit', m === 'music');
+  if (m === 'camera') askTilt();
+}
+$('mCamera').addEventListener('click', () => setMode('camera'));
+$('mMusic').addEventListener('click', () => setMode('music'));
+$('play').addEventListener('click', () => {
+  if (!playing) {
+    M.reset(); resetHand(); now = 0; lead = 0; playAt = clockT; playing = true; started = true;
+    audio.start(LEAD, heardHand);   // the sound starts here, and only here
+    $('play').textContent = 'STOP'; $('modes').classList.add('on');
+  } else {
+    audio.stop();
+    playing = false; lead = 1; selected = -1; shot = 0; shotNext = null;
+    tension.fill(0); tensionHeld.fill(false);
+    $('play').textContent = 'PLAY';
+  }
+});
+
+// LEAVING — the phone locks, a call, another app: the music fades out over a bar and stops; PLAY starts it
+// again. Nothing plays in the background (docs/02 §11).
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'hidden' || !playing) return;
+  audio.stop(M.BAR * SPB);
+  playing = false; lead = 1; selected = -1; shot = 0; shotNext = null; tension.fill(0); tensionHeld.fill(false);
+  $('play').textContent = 'PLAY';
+});
+
+// ─── The phone's tilt (docs/01 §5) — asked once, on CAMERA, as iPhone wants a tap for it ────────
+let tiltAsked = false;
+async function askTilt() {
+  if (tiltAsked) return; tiltAsked = true;
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return; } } catch { return; }
+  window.addEventListener('deviceorientation', (e) => {
+    if (e.beta == null || e.gamma == null) return;
+    if (!tilt0) tilt0 = { b: e.beta, g: e.gamma };
+    const nt = { x: Math.max(-1, Math.min(1, (e.gamma - tilt0.g) / 30)), y: Math.max(-1, Math.min(1, (e.beta - tilt0.b) / 30)) };
+    if (mode === 'camera' && Math.hypot(nt.x - tilt.x, nt.y - tilt.y) > 0.02) flash('lean');
+    tilt = nt;
+  });
+}
+
+// ─── The gestures that work now, top left ────────────────────────────────────────────────────────
+// Per input — the one used last: touch, mouse, keys or the PS5 controller (Marco, 2026-10-04: *"touch, mouse and
+// keyboard and also ps5 controller"*).
+const GUIDE = {
+  touch: {
+    whole: [['select', 'tap staff · select'], ['grow', 'swipe · grow'], ['break', 'drag down · break'], ['signal', '2 fingers · signal']],
+    staff: [['colour', 'slide ↔ · colour'], ['more', 'slide ↕ · more / less'], ['tension', 'hold · tension'], ['drive', 'push · drive'], ['echo', 'twist · echo'], ['space', 'spread · space'], ['back', 'tap empty · back']],
+    chords: [['next', 'tap chord · next']],
+    camera: [['turn', 'drag · turn'], ['zoom', 'pinch · zoom'], ['move', '2 fingers · move'], ['shot', 'double-tap · shot'], ['lean', 'tilt · lean']],
+  },
+  mouse: {
+    whole: [['select', 'click staff · select'], ['grow', 'drag sideways · grow'], ['break', 'drag down · break'], ['signal', 'scroll · signal']],
+    staff: [['colour', 'drag ↔ · colour'], ['more', 'drag ↕ · more / less'], ['tension', 'hold button · tension'], ['drive', 'scroll ↕ · drive'], ['echo', 'shift + scroll · echo'], ['space', 'alt + scroll · space'], ['back', 'click empty · back']],
+    chords: [['next', 'click chord · next']],
+    camera: [['turn', 'drag · turn'], ['zoom', 'scroll · zoom'], ['move', 'right-drag · move'], ['shot', 'double-click · shot']],
+  },
+  keys: {
+    whole: [['select', '1–8 · select'], ['grow', '→ · grow'], ['break', 'hold ↓ · break'], ['signal', 'D E S + ↑ ↓ · signal'], ['mode', 'tab · camera']],
+    staff: [['colour', '← → · colour'], ['more', '↑ ↓ · more / less'], ['tension', 'hold space · tension'], ['drive', 'D + ↑ ↓ · drive'], ['echo', 'E + ↑ ↓ · echo'], ['space', 'S + ↑ ↓ · space'], ['back', 'esc · back']],
+    chords: [['next', 'N · next chord']],
+    camera: [['turn', 'arrows · turn'], ['zoom', '+ − · zoom'], ['move', 'shift + arrows · move'], ['shot', 'N · shot'], ['mode', 'tab · music']],
+  },
+  pad: {
+    whole: [['select', 'L1 R1 · select'], ['grow', '△ · grow'], ['break', 'hold L2 · break'], ['drive', 'R2 · drive'], ['signal', 'right stick · echo / space']],
+    staff: [['colour', 'left stick ↔ · colour'], ['more', 'left stick ↕ · more / less'], ['tension', 'hold □ · tension'], ['drive', 'R2 · drive'], ['echo', 'right stick ↔ · echo'], ['space', 'right stick ↕ · space'], ['back', '○ · back']],
+    chords: [['next', 'd-pad + ✕ · next chord']],
+    camera: [['turn', 'left stick · turn'], ['move', 'right stick · move'], ['zoom', 'R2 L2 · zoom'], ['shot', '△ · shot']],
+  },
+};
+let input = matchMedia('(pointer: coarse)').matches ? 'touch' : 'mouse';
+const litUntil = {};
+let guideKey = '';
+function flash(k) { litUntil[k] = clockT + 0.6; }
+function drawGuide() {
+  const el = $('guide');
+  const G = GUIDE[input];
+  const lines = !playing ? [] : mode === 'camera' ? G.camera : selected < 0 ? G.whole : selected === M.CHORDS_PART ? [...G.staff, ...G.chords] : G.staff;
+  const key = input + ':' + lines.map(([k]) => k + (litUntil[k] > clockT ? '*' : '')).join(',');
+  if (key === guideKey) return;
+  guideKey = key;
+  el.classList.toggle('on', lines.length > 0);
+  el.replaceChildren(...lines.map(([k, t]) => { const d = document.createElement('div'); d.textContent = t; if (litUntil[k] > clockT) d.className = 'lit'; return d; }));
+}
+
+// ─── What every input does — one set of actions ────────────────────────────────────────────────
+function select(p) { if (!playing || mode !== 'music') return; selected = p; flash('select'); }
+function back() { if (selected >= 0) { selected = -1; flash('back'); } }
+function switchOn() { if (bootAt == null) bootAt = clockT; }
+function toggleMode() { if (playing) { setMode(mode === 'camera' ? 'music' : 'camera'); flash('mode'); } }
+function growNow() { if (playing && mode === 'music') { M.grow(nowBeat()); flash('grow'); } }
+let breaking = false;
+function breakOn() { if (playing && !breaking) { breaking = true; M.breakdown(nowBeat()); } flash('break'); }
+function breakOff() { if (breaking) { breaking = false; if (playing) M.drop(nowBeat()); } }
+function tensionOn() { if (selected < 0) return; tensionHeld[selected] = true; tensionDropAt[selected] = null; flash('tension'); }
+function tensionOff() { for (let p = 0; p < M.NP; p++) if (tensionHeld[p]) { tensionHeld[p] = false; tensionDropAt[p] = (Math.floor(now / M.BAR) + 1) * M.BAR; } }   // back on the next bar's one
+// More or less, by a little: the wish kept, heard from the next bar once it differs enough.
+let moreWish = null;
+function moreBy(d) {
+  if (selected < 0) return;
+  if (moreWish == null || moreWish.p !== selected) moreWish = { p: selected, v: M.moreOf(selected, nowBeat()) };
+  moreWish.v = clamp(moreWish.v + d);
+  if (Math.abs(moreWish.v - M.moreOf(selected, nowBeat())) > 0.04) M.setMore(selected, moreWish.v, nowBeat());
+  flash('more');
+}
+function colourBy(d) { if (selected < 0) return; colour[selected] = clamp(colour[selected] + d); flash('colour'); }
+// The signal by a little, on the selected part or the whole mix.
+function signalBy(which, d) {
+  const arr = which === 'drive' ? drive : which === 'echo' ? echo : space;
+  for (const q of targets()) arr[q] = clamp(arr[q] + d);
+  flash(selected < 0 ? 'signal' : which);
+}
+let cursor = 0;                                    // the next chord the keys or the d-pad point at
+function chordStep(dir) { if (!choices) return; cursor = (cursor + dir + choices.chords.length) % choices.chords.length; }
+function chordPick(i = cursor) { if (!choices) return; M.pickChord(choices.bar, choices.names[i]); flash('next'); }
+function nextShot() { shotNext = (shot + 1) % 4; flash('shot'); }
+
+// ─── The fingers ────────────────────────────────────────────────────────────────────────────────
+const pts = new Map();                             // pointerId → { x, y, x0, y0, t0 }
+let g = null;                                      // the gesture under way
+let lastTap = { t: 0, x: 0, y: 0 };
+const TAP_MOVE = 10, TAP_MS = 280, HOLD_MS = 450;
+
+function two() { const [a, b] = [...pts.values()]; return { cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x) }; }
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  input = e.pointerType === 'mouse' ? 'mouse' : 'touch';
+  try { canvas.setPointerCapture(e.pointerId); } catch {}
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now() });
+  if (!ready()) { if (pts.size === 1) g = { kind: 'standby' }; return; }
+  if (pts.size === 1) {
+    g = { kind: 'one', moved: false, t0: performance.now(), lastX: e.clientX, lastY: e.clientY, vx: 0, vy: 0, lastT: performance.now(),
+          more0: selected >= 0 ? M.moreOf(selected, nowBeat()) : 0, dy: 0, down: false, held: false };
+    if (mode === 'camera') { score.hold(true); if (e.pointerType === 'mouse' && (e.button === 2 || e.shiftKey)) g.pan = true; }   // right-drag or shift-drag: move
+    else if (selected >= 0) g.holdTimer = setTimeout(() => { if (g && g.kind === 'one' && !g.moved) { g.held = true; tensionHeld[selected] = true; tensionDropAt[selected] = null; } }, HOLD_MS);
+  } else if (pts.size === 2) {
+    endOne(false);
+    const t = two(); g = { kind: 'two', ...t, last: t };
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  const p = pts.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  if (!g) return;
+  if (g.kind === 'one') {
+    const tn = performance.now(), dtm = Math.max(1, tn - g.lastT);
+    g.vx = g.vx * 0.6 + (dx / dtm * 1000) * 0.4; g.vy = g.vy * 0.6 + (dy / dtm * 1000) * 0.4; g.lastT = tn;
+    if (Math.hypot(p.x - p.x0, p.y - p.y0) > TAP_MOVE) { g.moved = true; clearTimeout(g.holdTimer); }
+    if (!g.moved) return;
+    if (mode === 'camera') { if (g.pan) { score.pan(dx, dy); flash('move'); } else { score.orbit(dx, dy); flash('turn'); } return; }
+    if (g.held) { flash('tension'); return; }      // holding: the tension, not a slide
+    if (selected >= 0) {
+      // One finger on a part: colour left and right; more or less up and down, heard from the next bar.
+      colour[selected] = clamp(colour[selected] + dx / window.innerWidth * 1.1);
+      if (Math.abs(dx) > Math.abs(dy)) flash('colour'); else flash('more');
+      g.dy += dy;
+      const want = clamp(g.more0 - g.dy / window.innerHeight * 1.6);
+      if (Math.abs(want - M.moreOf(selected, nowBeat())) > 0.04) M.setMore(selected, want, nowBeat());
+    } else {
+      // The whole song: drag down — the breakdown, while held.
+      const ddy = p.y - p.y0, ddx = p.x - p.x0;
+      if (!g.down && ddy > 60 && ddy > Math.abs(ddx) * 1.3) { g.down = true; if (playing) M.breakdown(nowBeat()); }
+      if (g.down) flash('break');
+    }
+  } else if (g.kind === 'two' && pts.size === 2) {
+    const t = two(), L = g.last;
+    if (mode === 'camera') {
+      score.pinch(t.d / Math.max(1, L.d)); score.pan(t.cx - L.cx, t.cy - L.cy);
+      if (Math.abs(t.d - L.d) > Math.hypot(t.cx - L.cx, t.cy - L.cy)) flash('zoom'); else flash('move');
+    } else {
+      // Two fingers — the signal (docs/01 §6.4): push up, drive; twist, echo; spread, space.
+      let da = t.ang - L.ang; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+      for (const q of targets()) {
+        drive[q] = clamp(drive[q] - (t.cy - L.cy) / window.innerHeight * 1.4);
+        echo[q] = clamp(echo[q] + da / (Math.PI / 2));
+        space[q] = clamp(space[q] + Math.log2(t.d / Math.max(1, L.d)) * 0.9);
+      }
+      // Which of the three the fingers are doing most: that line lights.
+      const push = Math.abs(t.cy - L.cy) / 3, twist = Math.abs(da) * 60, spread = Math.abs(t.d - L.d) / 2;
+      const most = push > twist && push > spread ? 'drive' : twist > spread ? 'echo' : 'space';
+      if (Math.max(push, twist, spread) > 0.3) flash(selected < 0 ? 'signal' : most);
+    }
+    g.last = t;
+  }
+});
+function endOne(asTap, e) {
+  if (!g || g.kind !== 'one') return;
+  clearTimeout(g.holdTimer);
+  if (mode === 'camera') { score.hold(false); if (g.moved && !g.pan && performance.now() - g.lastT < 90) score.fling(g.vx, g.vy); }   // a finger that stopped before lifting does not fling
+  if (g.held && selected >= 0) { tensionHeld[selected] = false; tensionDropAt[selected] = (Math.floor(now / M.BAR) + 1) * M.BAR; }   // let go: back in on the next bar's one
+  if (g.down && playing) M.drop(nowBeat());
+  if (asTap && e) {
+    const p = pts.get(e.pointerId);
+    const dx = e.clientX - p.x0, dy = e.clientY - p.y0, dur = performance.now() - g.t0;
+    if (!g.moved && dur < TAP_MS) tap(e.clientX, e.clientY);
+    else if (mode === 'music' && selected < 0 && playing && Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && dur < 700) { M.grow(nowBeat()); flash('grow'); }   // the next section, a slow growth
+  }
+  g = null;
+}
+function up(e) {
+  if (!pts.has(e.pointerId)) return;
+  if (g?.kind === 'standby') {
+    const led = score.screenOf('led');
+    if (bootAt == null && led && Math.hypot(e.clientX - led.x, e.clientY - led.y) < 60) { bootAt = clockT; }
+    g = null;
+  } else if (g?.kind === 'one') endOne(true, e);
+  else if (g?.kind === 'two' && pts.size <= 2) g = null;
+  pts.delete(e.pointerId);
+}
+canvas.addEventListener('pointerup', up);
+canvas.addEventListener('pointercancel', up);
+
+function tap(x, y) {
+  const t = performance.now();
+  const dbl = t - lastTap.t < 320 && Math.hypot(x - lastTap.x, y - lastTap.y) < 40;
+  lastTap = { t: dbl ? 0 : t, x, y };
+  if (mode === 'camera') { if (dbl) { shotNext = (shot + 1) % 4; flash('shot'); } return; }   // the next shot, landing on the next bar
+  if (!playing) return;
+  // An offered chord?
+  if (selected === M.CHORDS_PART && choices) {
+    for (let i = 0; i < choices.chords.length; i++) {
+      const s = score.screenOf({ choice: i });
+      if (s && Math.hypot(x - s.x, y - s.y) < 36) { M.pickChord(choices.bar, choices.names[i]); flash('next'); return; }
+    }
+  }
+  const hit = score.pick(x, y);
+  const part = hit && hit.staff ? M.CHANNELS.indexOf(hit.staff) : -1;
+  if (part >= 0 && part !== selected) { selected = part; flash('select'); }   // a staff: it is selected
+  else if (part < 0 && selected >= 0) { selected = -1; flash('back'); }     // empty space: back out to the song
+}
+
+// ─── The mouse's wheel and the trackpad ─────────────────────────────────────────────────────────
+// MUSIC: scroll ↕ drive · shift + scroll (or sideways on a trackpad) echo · alt + scroll (or a trackpad pinch) space;
+// on the whole score, all three on the whole mix. CAMERA: scroll or pinch, zoom.
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (!playing) return;
+  input = 'mouse';
+  const px = e.deltaMode === 1 ? 16 : 1;           // lines to pixels
+  let dx = e.deltaX * px, dy = e.deltaY * px;
+  if (mode === 'camera') { score.pinch(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0015))); flash('zoom'); return; }
+  if (e.ctrlKey || e.altKey) { signalBy('space', -dy * (e.ctrlKey ? 0.01 : 0.002)); return; }
+  if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+  if (Math.abs(dx) > Math.abs(dy)) signalBy('echo', dx * 0.002); else signalBy('drive', -dy * 0.002);
+}, { passive: false });
+
+// ─── The keys ───────────────────────────────────────────────────────────────────────────────────
+const keys = new Set();
+const KEYED = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Tab', 'Enter', 'Escape']);
+window.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey) return;
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (KEYED.has(e.key)) e.preventDefault();
+  input = 'keys';
+  const first = !keys.has(k); keys.add(k);
+  if (!first) return;
+  if (k === 'Enter') { if (!ready()) switchOn(); else $('play').click(); return; }
+  if (!playing) return;
+  if (k === 'Tab') return toggleMode();
+  if (mode === 'camera') { if (k === 'n') nextShot(); return; }
+  if (k >= '1' && k <= '8') return select(+k - 1);
+  if (k === 'Escape') return back();
+  if (k === ' ') return tensionOn();
+  if (k === 'n') { chordStep(1); chordPick(); return; }
+  const signal = keys.has('d') || keys.has('e') || keys.has('s');
+  if (selected < 0 && !signal) { if (k === 'ArrowRight') growNow(); if (k === 'ArrowDown') breakOn(); }
+});
+window.addEventListener('keyup', (e) => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys.delete(k);
+  if (k === ' ') tensionOff();
+  if (k === 'ArrowDown') breakOff();
+});
+window.addEventListener('blur', () => { keys.clear(); tensionOff(); breakOff(); });
+// Held keys act every frame.
+function keysFrame(dt) {
+  if (!playing || !keys.size) return;
+  const ax = (keys.has('ArrowRight') ? 1 : 0) - (keys.has('ArrowLeft') ? 1 : 0), ay = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 1 : 0);
+  if (mode === 'camera') {
+    if (ax || ay) { if (keys.has('Shift')) { score.pan(-ax * 420 * dt, ay * 420 * dt); flash('move'); } else { score.orbit(ax * 260 * dt, -ay * 200 * dt); flash('turn'); } }
+    const z = (keys.has('+') || keys.has('=') ? 1 : 0) - (keys.has('-') ? 1 : 0);
+    if (z) { score.pinch(Math.exp(z * 1.2 * dt)); flash('zoom'); }
+    return;
+  }
+  const which = keys.has('d') ? 'drive' : keys.has('e') ? 'echo' : keys.has('s') ? 'space' : null;
+  if (which) { if (ay) signalBy(which, ay * 0.6 * dt); return; }
+  if (selected < 0) return;
+  if (ax) colourBy(ax * 0.5 * dt);
+  if (ay) moreBy(ay * 0.45 * dt);
+}
+
+// ─── The PS5 controller (the browser's standard mapping) ────────────────────────────────────────
+// ✕ 0 · ○ 1 · □ 2 · △ 3 · L1 4 · R1 5 · L2 6 · R2 7 · Options 9 · d-pad ← 14 → 15 · touchpad 17; sticks 0–3.
+// A browser does not count a controller's buttons as a tap: on some, the first PLAY has to be a tap or a click.
+let padWas = [], r2Was = 0;
+function padFrame(dt) {
+  const pad = [...(navigator.getGamepads?.() || [])].find((p) => p && p.connected);
+  if (!pad) return;
+  const b = pad.buttons, val = (i) => b[i]?.value || 0, on = (i) => !!b[i]?.pressed, edge = (i) => on(i) && !padWas[i], rel = (i) => !on(i) && padWas[i];
+  const dz = (x) => (Math.abs(x) < 0.15 ? 0 : (x - Math.sign(x) * 0.15) / 0.85);
+  const [lx, ly, rx, ry] = [0, 1, 2, 3].map((i) => dz(pad.axes[i] || 0));
+  if (b.some((x) => x.pressed) || lx || ly || rx || ry) input = 'pad';
+  if (!ready()) { if (edge(0) || edge(9)) switchOn(); }
+  else if (edge(9) || (edge(0) && !playing)) $('play').click();   // Options, or ✕ while stopped (Marco: *"X should also work"*)
+  if (playing) {
+    if (edge(17)) toggleMode();
+    if (mode === 'camera') {
+      if (lx || ly) { score.orbit(lx * 320 * dt, ly * 240 * dt); flash('turn'); }
+      if (rx || ry) { score.pan(-rx * 480 * dt, -ry * 480 * dt); flash('move'); }
+      const z = val(7) - val(6);
+      if (Math.abs(z) > 0.02) { score.pinch(Math.exp(z * 1.4 * dt)); flash('zoom'); }
+      if (edge(3)) nextShot();
+    } else {
+      if (edge(4)) select(selected <= 0 ? M.NP - 1 : selected - 1);
+      if (edge(5)) select((selected + 1) % M.NP);
+      if (edge(1)) back();
+      if (edge(3)) growNow();
+      if (edge(6) && selected < 0) breakOn();
+      if (rel(6)) breakOff();
+      if (edge(2)) tensionOn();
+      if (rel(2)) tensionOff();
+      if (on(2)) flash('tension');
+      if (selected >= 0) { if (lx) colourBy(lx * 0.6 * dt); if (ly) moreBy(-ly * 0.5 * dt); }
+      if (rx) signalBy('echo', rx * 0.6 * dt);
+      if (ry) signalBy('space', -ry * 0.6 * dt);
+      const r2 = val(7);                           // drive by how far R2 is pressed; let go, it goes back
+      if (r2 > 0.02 || r2Was > 0.02) { for (const q of targets()) drive[q] = r2; flash(selected < 0 ? 'drive' : 'drive'); }
+      r2Was = r2;
+      if (edge(14)) chordStep(-1);
+      if (edge(15)) chordStep(1);
+      if (edge(0)) chordPick();
+    }
+  }
+  padWas = b.map((x) => x.pressed);
+}
+
+// ─── The frame ──────────────────────────────────────────────────────────────────────────────────
+const hz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+function scoreEvents(evs) {
+  const out = [];
+  for (const e of evs) {
+    const t = Math.round(e.beat * 4), at = e.beat * 4, len = e.dur * 4, lane = e.part;
+    if (Array.isArray(e.midi)) out.push({ lane, t, at, len, fs: e.midi.map(hz) });
+    else if (e.kind === 'swell') continue;          // heard, not written
+    else if (e.kind) out.push({ lane, t, at, len: 0.6, kind: e.kind, v: e.vel });
+    else out.push({ lane, t, at, len, f: hz(e.midi) });
+  }
+  return out;
+}
+let playBtnOn = false, choices = null, skew = 0, last = performance.now();   // skew: time stepped by hand, for looking at it from outside
+function frame() { requestAnimationFrame(frame); tick(performance.now() + skew); }
+function tick(t) {
+  const dt = Math.min(0.1, Math.max(0, t - last) / 1000); last = t; clockT = t / 1000;   // the switching-on and the music run on the real clock
+  if (playing) {                                  // heard, the audio clock is the clock; else the real one
+    const heard = audio.beat(), b = heard != null ? heard + LEAD : (clockT - playAt) / SPB;
+    lead = Math.min(1, Math.max(0, b / LEAD)); now = Math.max(0, b - LEAD);
+  }
+  const bar = Math.floor(now / M.BAR);
+  keysFrame(dt); padFrame(dt);
+  drawGuide();
+  if (ready() && !playBtnOn) { playBtnOn = true; $('play').classList.add('on'); }   // PLAY lights last — the machine is ready (docs/02 §2)
+  // A shot asked for lands on the next bar (docs/01 §5); stopped, at once.
+  if (shotNext != null && (!playing || now - bar * M.BAR < dt / SPB * 1.5 || shotNext === 0)) { shot = shotNext; shotNext = null; }
+  if (shotNext != null && playing) { const into = now / M.BAR - bar; if (into < 0.05) { shot = shotNext; shotNext = null; } }
+  // Hold: the part rises while held; let go, it falls back on the next bar's one.
+  for (let p = 0; p < M.NP; p++) {
+    if (tensionHeld[p]) tension[p] = Math.min(1, tension[p] + dt / 6);
+    else if (tensionDropAt[p] != null && now >= tensionDropAt[p]) { tension[p] = Math.max(0, tension[p] - dt / 0.25); if (tension[p] === 0) tensionDropAt[p] = null; }
+  }
+  // The next chords: on CHORDS, in the bar before a change (docs/02 §8).
+  choices = null;
+  if (playing && selected === M.CHORDS_PART) {
+    const nb = M.nextChange(now);
+    if (nb * M.BAR - now <= M.BAR) {
+      const cs = M.choicesAt(nb), picked = M.pickedAt(nb);
+      choices = { bar: nb, beat: nb * M.BAR * 4, chords: cs.map((c) => c.v), names: cs.map((c) => c.name), picked: picked ? cs.findIndex((c) => c.name === picked) : -1, cursor: input === 'keys' || input === 'pad' ? cursor : -1 };
+    }
+  }
+  score.frame({
+    now: now * 4, rate: M.BPM / 60 * 4, playing, hold: !playing, lead: playing && lead < 1 ? lead : null,
+    events: playing ? scoreEvents(M.events(Math.max(0, now - 10), now + 44)) : [],
+    level: (p) => (playing ? M.levelOf(p, now) : 0), off: (p) => playing && M.levelOf(p, now) === 0,
+    lights: { key: started && playing, spots: false, ball: false, disco: false },
+    boot: boot(), started, camMode: mode === 'camera', shot, tilt: mode === 'camera' ? tilt : { x: 0, y: 0 },
+    selected, focus: mode === 'music' && selected >= 0, home: mode === 'music' && selected >= 0,
+    ...heardHand(), repeats: 0.55, choices,
+  }, dt);
+}
+requestAnimationFrame(frame);
+// For looking at the specimen from outside — silent, as everything here.
+window.__specimen = { score, M, get now() { return now; }, get selected() { return selected; }, set selected(v) { selected = v; }, get mode() { return mode; }, setMode, colour, drive, echo, space, tension, tapAt: tap,
+  power() { bootAt = clockT; }, get boot() { return boot(); },
+  step(sec, n = 1) { for (let i = 0; i < n; i++) { skew += sec * 1000 / n; tick(performance.now() + skew); } }, play() { $('play').click(); } };
+</script>
+</body>
+</html>
