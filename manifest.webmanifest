@@ -1,0 +1,9 @@
+{
+  "name": "05",
+  "short_name": "05",
+  "start_url": ".",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000"
+}

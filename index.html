@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
 <title>05</title>
 <style>
   /* instrument-design-05 — the specimen (docs/01, docs/02). Silent: no file in this folder opens a sound. */
@@ -19,6 +20,7 @@
          letter-spacing: .14em; opacity: 0; pointer-events: none; transition: opacity .9s ease; }
   .top.on { opacity: 1; pointer-events: auto; }
   #modes { left: 0; right: 0; text-align: center; }
+  @media (max-width: 430px) { .top { font-size: 12px; letter-spacing: .07em; } #modes button { padding: 10px 3px; } #modes .dot { padding: 0 1px; } }   /* three words and STOP on a phone */
   #modes button, #play { background: none; border: 0; padding: 10px 6px; margin: 0; font: inherit; letter-spacing: inherit;
          color: rgba(240, 235, 225, .32); cursor: pointer; transition: color .4s ease, text-shadow .4s ease; }
   #modes button.lit { color: #f0ebe1; text-shadow: 0 0 10px rgba(255, 220, 170, .45); }
@@ -27,19 +29,26 @@
   #play.top { position: fixed; padding: 10px 10px; }
   /* The gestures that work now, top left — bare words, no box (Marco, 2026-10-04: *"we use the top left to show the
      gestures that are current"*). A line lights while its gesture is used. */
-  #guide { position: fixed; left: calc(env(safe-area-inset-left) + 14px); top: calc(env(safe-area-inset-top) + 50px);
-           font: 500 11px/1.75 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: .06em; pointer-events: none;
-           color: rgba(240, 235, 225, .66); opacity: 0; transition: opacity .6s ease; white-space: nowrap;
-           text-shadow: 0 0 8px rgba(0, 0, 0, 1), 0 0 3px rgba(0, 0, 0, 1), 0 0 1px rgba(0, 0, 0, 1); }
+  /* Readable over the paper (Marco: *"i cant read them - better ui"*): a little larger, each line on its own small dark
+     band; the line in use lit warm. */
+  #guide { position: fixed; left: calc(env(safe-area-inset-left) + 12px); top: calc(env(safe-area-inset-top) + 50px);
+           font: 500 13px/1 "Helvetica Neue", Helvetica, Arial, sans-serif; letter-spacing: .04em; pointer-events: none;
+           opacity: 0; transition: opacity .6s ease; white-space: nowrap; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
   #guide.on { opacity: 1; }
-  #guide div { transition: color .25s ease, text-shadow .25s ease; }
-  #guide div.lit { color: #f0ebe1; text-shadow: 0 0 10px rgba(255, 220, 170, .6), 0 0 2px rgba(0, 0, 0, .9); }
+  #guide div { padding: 5px 9px; border-radius: 4px; background: rgba(8, 7, 6, .72); color: rgba(240, 235, 225, .86);
+               transition: color .25s ease, background .25s ease; -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+  #guide div.lit { color: #1a1206; background: rgba(255, 206, 140, .92); }
+  /* FULL, beside STOP, where a browser can fill the screen (docs/01 §16). */
+  #full { left: calc(env(safe-area-inset-left) + 4px); }   /* the top left corner, clear of CAMERA · MUSIC on a phone */
+  #full.top { position: fixed; padding: 10px 10px; background: none; border: 0; font: inherit; letter-spacing: inherit; color: rgba(240, 235, 225, .45); cursor: pointer; }
+  #full.lit { color: #f0ebe1; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="modes" class="top"><button id="mCamera">CAMERA</button><span class="dot">·</span><button id="mMusic" class="lit">MUSIC</button></div>
+<div id="modes" class="top"><button id="mCamera">CAMERA</button><span class="dot">·</span><button id="mMusic" class="lit">MUSIC</button><span class="dot">·</span><button id="mLights">LIGHTS</button></div>
 <button id="play" class="top">PLAY</button>
+<button id="full" class="top">FULL</button>
 <div id="guide"></div>
 <script type="module">
 import { createScore } from './score.js';
@@ -91,14 +100,69 @@ const targets = () => (selected >= 0 ? [selected] : [...Array(M.NP).keys()]);
 // ─── The top ────────────────────────────────────────────────────────────────────────────────────
 function setMode(m) {
   mode = m;
-  $('mCamera').classList.toggle('lit', m === 'camera'); $('mMusic').classList.toggle('lit', m === 'music');
+  $('mCamera').classList.toggle('lit', m === 'camera'); $('mMusic').classList.toggle('lit', m === 'music'); $('mLights').classList.toggle('lit', m === 'lights');
   if (m === 'camera') askTilt();
+}
+// FULL — the whole screen, where the browser allows it (a computer, an iPad). An iPhone's Safari does not: there 05 fills
+// the screen when opened from the Home Screen (the manifest), and FULL is not shown.
+const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+const fsOk = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+function toggleFull() {
+  if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  else { const el = document.documentElement; (el.requestFullscreen || el.webkitRequestFullscreen).call(el); }
+}
+$('full').addEventListener('click', toggleFull);
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener(ev, () => { $('full').classList.toggle('lit', !!fsEl()); fit(); });
+
+// THE MARKS — what the hand did, written into the score at the bar it is heard (docs/01 §16). One of a kind per staff
+// per bar: a newer one replaces it.
+const marks = [];
+function mark(kind, staff, bar, extra = {}) {
+  const at = bar * M.BAR * 4, key = `${kind}:${staff}:${bar}`;
+  const i = marks.findIndex((m) => m.key === key);
+  const m = { key, kind, staff, at, born: i >= 0 ? marks[i].born : clockT, ...extra };
+  if (extra.to != null) m.to = extra.to * M.BAR * 4;
+  if (i >= 0) marks[i] = m; else marks.push(m);
+  while (marks.length > 160) marks.shift();
+}
+const barNext = () => Math.floor(now / M.BAR + 1e-6) + 1;
+const staffOrAll = () => (selected >= 0 ? selected : -1);
+function markSignal(which) {
+  const st = staffOrAll(), b = barNext(), q = selected >= 0 ? selected : 0;
+  if (which === 'drive') { if (drive[q] > 0.05) mark('drive', st, b, { text: drive[q] > 0.55 ? 'ff' : 'f' }); }
+  else mark(which === 'echo' ? 'eco' : 'spazio', st, b, { to: b + 2 });
 }
 $('mCamera').addEventListener('click', () => setMode('camera'));
 $('mMusic').addEventListener('click', () => setMode('music'));
+$('mLights').addEventListener('click', () => setMode('lights'));
+
+// ─── LIGHTS (docs/01 §17, Marco: *"now we need lights"*) — the rig played as a lighting desk ─────
+// colour warm 0 → cool 1 · brightness · turn (the key light round the score) · beam narrow 0 → wide 1 · a spot per
+// staff · chase while held · blackout, landing on the next bar · scenes, swiped. The values here; score.js eases them.
+const SCENES = [
+  { hue: 0.15, bright: 0.6, turn: 0, beam: 0.5, spots: [], disco: false, ball: false },          // as it opens: warm, from the front
+  { hue: 0.85, bright: 0.35, turn: 1.6, beam: 0.25, spots: [5, 6], disco: false, ball: false },  // cool and low, a narrow light from the side, the chords and the pad lit
+  { hue: 0.55, bright: 0.5, turn: -0.7, beam: 0.85, spots: [0, 4], disco: true, ball: true },    // the coloured pools and the mirror ball, the kick and the bass lit
+  { hue: 0.03, bright: 0.75, turn: 2.8, beam: 1, spots: [], disco: false, ball: false },          // amber and wide, from behind
+];
+const light = { hue: 0.15, bright: 0.6, turn: 0, beam: 0.5, chase: false, black: false, spots: new Array(M.NP).fill(false), scene: 0, disco: false, ball: false, cursor: -1 };
+let blackAt = null;                                // the beat a blackout (or its end) lands on
+function scene(dir) {
+  light.scene = (light.scene + dir + SCENES.length) % SCENES.length;
+  const sc = SCENES[light.scene];
+  Object.assign(light, { hue: sc.hue, bright: sc.bright, turn: sc.turn, beam: sc.beam, disco: sc.disco, ball: sc.ball });
+  light.spots.fill(false); for (const p of sc.spots) light.spots[p] = true;
+  flash('scene');
+}
+function resetLight() { light.scene = 1; scene(-1); light.chase = false; light.black = false; blackAt = null; light.cursor = -1; }
+const lightBy = (k, d) => { light[k] = k === 'turn' ? Math.max(-Math.PI, Math.min(Math.PI, light[k] + d)) : clamp(light[k] + d); flash(k === 'hue' ? 'lcolour' : k); };
+function spot(p) { if (p < 0) return; light.spots[p] = !light.spots[p]; flash('spot'); }
+function blackout() { blackAt = barNext() * M.BAR; flash('black'); }
+function chaseOn() { light.chase = true; flash('chase'); }
+function chaseOff() { light.chase = false; }   // the light starts as the first scene; PLAY sets it again (resetLight)
 $('play').addEventListener('click', () => {
   if (!playing) {
-    M.reset(); resetHand(); now = 0; lead = 0; playAt = clockT; playing = true; started = true;
+    M.reset(); resetHand(); resetLight(); marks.length = 0; now = 0; lead = 0; playAt = clockT; playing = true; started = true;
     audio.start(LEAD, heardHand);   // the sound starts here, and only here
     $('play').textContent = 'STOP'; $('modes').classList.add('on');
   } else {
@@ -137,28 +201,32 @@ async function askTilt() {
 // keyboard and also ps5 controller"*).
 const GUIDE = {
   touch: {
-    whole: [['select', 'tap staff · select'], ['grow', 'swipe · grow'], ['break', 'drag down · break'], ['signal', '2 fingers · signal']],
+    whole: [['select', 'tap staff · select'], ['grow', 'swipe → ← · grow / ungrow'], ['break', 'drag down · break'], ['signal', '2 fingers · signal']],
     staff: [['colour', 'slide ↔ · colour'], ['more', 'slide ↕ · more / less'], ['tension', 'hold · tension'], ['drive', 'push · drive'], ['echo', 'twist · echo'], ['space', 'spread · space'], ['back', 'tap empty · back']],
     chords: [['next', 'tap chord · next']],
     camera: [['turn', 'drag · turn'], ['zoom', 'pinch · zoom'], ['move', '2 fingers · move'], ['shot', 'double-tap · shot'], ['lean', 'tilt · lean']],
+    lights: [['lcolour', 'drag ↔ · colour'], ['bright', 'drag ↕ · brightness'], ['spot', 'tap staff · spot'], ['turn', 'twist · turn'], ['beam', 'spread · beam'], ['chase', 'hold · chase'], ['black', 'double-tap · blackout'], ['scene', 'swipe ← → · scene']],
   },
   mouse: {
-    whole: [['select', 'click staff · select'], ['grow', 'drag sideways · grow'], ['break', 'drag down · break'], ['signal', 'scroll · signal']],
+    whole: [['select', 'click staff · select'], ['grow', 'drag → ← · grow / ungrow'], ['break', 'drag down · break'], ['signal', 'scroll · signal']],
     staff: [['colour', 'drag ↔ · colour'], ['more', 'drag ↕ · more / less'], ['tension', 'hold button · tension'], ['drive', 'scroll ↕ · drive'], ['echo', 'shift + scroll · echo'], ['space', 'alt + scroll · space'], ['back', 'click empty · back']],
     chords: [['next', 'click chord · next']],
     camera: [['turn', 'drag · turn'], ['zoom', 'scroll · zoom'], ['move', 'right-drag · move'], ['shot', 'double-click · shot']],
+    lights: [['lcolour', 'drag ↔ · colour'], ['bright', 'drag ↕ · brightness'], ['spot', 'click staff · spot'], ['turn', 'scroll · turn'], ['beam', 'alt + scroll · beam'], ['chase', 'hold button · chase'], ['black', 'double-click · blackout'], ['scene', 'flick ← → · scene']],
   },
   keys: {
-    whole: [['select', '1–8 · select'], ['grow', '→ · grow'], ['break', 'hold ↓ · break'], ['signal', 'D E S + ↑ ↓ · signal'], ['mode', 'tab · camera']],
+    whole: [['select', '1–8 · select'], ['grow', '→ ← · grow / ungrow'], ['break', 'hold ↓ · break'], ['signal', 'D E S + ↑ ↓ · signal'], ['mode', 'tab · camera']],
     staff: [['colour', '← → · colour'], ['more', '↑ ↓ · more / less'], ['tension', 'hold space · tension'], ['drive', 'D + ↑ ↓ · drive'], ['echo', 'E + ↑ ↓ · echo'], ['space', 'S + ↑ ↓ · space'], ['back', 'esc · back']],
     chords: [['next', 'N · next chord']],
-    camera: [['turn', 'arrows · turn'], ['zoom', '+ − · zoom'], ['move', 'shift + arrows · move'], ['shot', 'N · shot'], ['mode', 'tab · music']],
+    camera: [['turn', 'arrows · turn'], ['zoom', '+ − · zoom'], ['move', 'shift + arrows · move'], ['shot', 'N · shot'], ['mode', 'tab · lights']],
+    lights: [['lcolour', '← → · colour'], ['bright', '↑ ↓ · brightness'], ['spot', '1–8 · spot'], ['turn', 'Q E · turn'], ['beam', 'S W · beam'], ['chase', 'hold space · chase'], ['black', 'B · blackout'], ['scene', '[ ] · scene'], ['mode', 'tab · music']],
   },
   pad: {
-    whole: [['select', 'L1 R1 · select'], ['grow', '△ · grow'], ['break', 'hold L2 · break'], ['drive', 'R2 · drive'], ['signal', 'right stick · echo / space']],
+    whole: [['select', 'L1 R1 · select'], ['grow', 'd-pad → ← · grow / ungrow'], ['break', 'hold L2 · break'], ['drive', 'R2 · drive'], ['signal', 'right stick · echo / space']],
     staff: [['colour', 'left stick ↔ · colour'], ['more', 'left stick ↕ · more / less'], ['tension', 'hold □ · tension'], ['drive', 'R2 · drive'], ['echo', 'right stick ↔ · echo'], ['space', 'right stick ↕ · space'], ['back', '○ · back']],
     chords: [['next', 'd-pad + ✕ · next chord']],
     camera: [['turn', 'left stick · turn'], ['move', 'right stick · move'], ['zoom', 'R2 L2 · zoom'], ['shot', '△ · shot']],
+    lights: [['lcolour', 'left stick ↔ · colour'], ['bright', 'left stick ↕ · brightness'], ['spot', 'L1 R1 + ✕ · spot'], ['turn', 'right stick ↔ · turn'], ['beam', 'right stick ↕ · beam'], ['chase', 'hold □ · chase'], ['black', '△ · blackout'], ['scene', 'd-pad ← → · scene']],
   },
 };
 let input = matchMedia('(pointer: coarse)').matches ? 'touch' : 'mouse';
@@ -168,7 +236,7 @@ function flash(k) { litUntil[k] = clockT + 0.6; }
 function drawGuide() {
   const el = $('guide');
   const G = GUIDE[input];
-  const lines = !playing ? [] : mode === 'camera' ? G.camera : selected < 0 ? G.whole : selected === M.CHORDS_PART ? [...G.staff, ...G.chords] : G.staff;
+  const lines = !playing ? [] : mode === 'camera' ? G.camera : mode === 'lights' ? G.lights : selected < 0 ? G.whole : selected === M.CHORDS_PART ? [...G.staff, ...G.chords] : G.staff;
   const key = input + ':' + lines.map(([k]) => k + (litUntil[k] > clockT ? '*' : '')).join(',');
   if (key === guideKey) return;
   guideKey = key;
@@ -180,13 +248,22 @@ function drawGuide() {
 function select(p) { if (!playing || mode !== 'music') return; selected = p; flash('select'); }
 function back() { if (selected >= 0) { selected = -1; flash('back'); } }
 function switchOn() { if (bootAt == null) bootAt = clockT; }
-function toggleMode() { if (playing) { setMode(mode === 'camera' ? 'music' : 'camera'); flash('mode'); } }
-function growNow() { if (playing && mode === 'music') { M.grow(nowBeat()); flash('grow'); } }
+function toggleMode() { if (playing) { setMode(mode === 'music' ? 'camera' : mode === 'camera' ? 'lights' : 'music'); flash('mode'); } }
+function growNow() {
+  if (!playing || mode !== 'music') return;
+  const p = M.grow(nowBeat()); flash('grow');
+  if (p != null) mark('cresc', p, M.enterOf(p), { to: M.enterOf(p) + 8 });   // a hairpin over its eight bars
+}
+function ungrowNow() {
+  if (!playing || mode !== 'music') return;
+  const b = barNext(), p = M.ungrow(nowBeat()); flash('grow');
+  if (p != null) mark('decresc', p, b, { to: b + 8 });
+}
 let breaking = false;
-function breakOn() { if (playing && !breaking) { breaking = true; M.breakdown(nowBeat()); } flash('break'); }
-function breakOff() { if (breaking) { breaking = false; if (playing) M.drop(nowBeat()); } }
-function tensionOn() { if (selected < 0) return; tensionHeld[selected] = true; tensionDropAt[selected] = null; flash('tension'); }
-function tensionOff() { for (let p = 0; p < M.NP; p++) if (tensionHeld[p]) { tensionHeld[p] = false; tensionDropAt[p] = (Math.floor(now / M.BAR) + 1) * M.BAR; } }   // back on the next bar's one
+function breakOn() { if (playing && !breaking) { breaking = true; M.breakdown(nowBeat()); mark('dim', -1, barNext()); } flash('break'); }
+function breakOff() { if (breaking) { breaking = false; if (playing) { M.drop(nowBeat()); mark('subito', -1, barNext()); } } }
+function tensionOn() { if (selected < 0) return; tensionHeld[selected] = true; tensionDropAt[selected] = null; flash('tension'); mark('fermata', selected, Math.floor(now / M.BAR + 1e-6)); }
+function tensionOff() { for (let p = 0; p < M.NP; p++) if (tensionHeld[p]) { tensionHeld[p] = false; tensionDropAt[p] = barNext() * M.BAR; mark('atempo', p, barNext()); } }   // back on the next bar's one
 // More or less, by a little: the wish kept, heard from the next bar once it differs enough.
 let moreWish = null;
 function moreBy(d) {
@@ -202,16 +279,17 @@ function signalBy(which, d) {
   const arr = which === 'drive' ? drive : which === 'echo' ? echo : space;
   for (const q of targets()) arr[q] = clamp(arr[q] + d);
   flash(selected < 0 ? 'signal' : which);
+  markSignal(which);
 }
 let cursor = 0;                                    // the next chord the keys or the d-pad point at
 function chordStep(dir) { if (!choices) return; cursor = (cursor + dir + choices.chords.length) % choices.chords.length; }
-function chordPick(i = cursor) { if (!choices) return; M.pickChord(choices.bar, choices.names[i]); flash('next'); }
+function chordPick(i = cursor) { if (!choices) return; M.pickChord(choices.bar, choices.names[i]); flash('next'); mark('chord', M.CHORDS_PART, choices.bar, { text: choices.names[i] }); }
 function nextShot() { shotNext = (shot + 1) % 4; flash('shot'); }
 
 // ─── The fingers ────────────────────────────────────────────────────────────────────────────────
 const pts = new Map();                             // pointerId → { x, y, x0, y0, t0 }
 let g = null;                                      // the gesture under way
-let lastTap = { t: 0, x: 0, y: 0 };
+let lastTap = { t: 0, x: 0, y: 0 }, lastSpot = -1;
 const TAP_MOVE = 10, TAP_MS = 280, HOLD_MS = 450;
 
 function two() { const [a, b] = [...pts.values()]; return { cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x) }; }
@@ -226,7 +304,8 @@ canvas.addEventListener('pointerdown', (e) => {
     g = { kind: 'one', moved: false, t0: performance.now(), lastX: e.clientX, lastY: e.clientY, vx: 0, vy: 0, lastT: performance.now(),
           more0: selected >= 0 ? M.moreOf(selected, nowBeat()) : 0, dy: 0, down: false, held: false };
     if (mode === 'camera') { score.hold(true); if (e.pointerType === 'mouse' && (e.button === 2 || e.shiftKey)) g.pan = true; }   // right-drag or shift-drag: move
-    else if (selected >= 0) g.holdTimer = setTimeout(() => { if (g && g.kind === 'one' && !g.moved) { g.held = true; tensionHeld[selected] = true; tensionDropAt[selected] = null; } }, HOLD_MS);
+    else if (mode === 'lights') { g.hue0 = light.hue; g.bright0 = light.bright; g.holdTimer = setTimeout(() => { if (g && g.kind === 'one' && !g.moved) { g.held = true; chaseOn(); } }, HOLD_MS); }
+    else if (selected >= 0) g.holdTimer = setTimeout(() => { if (g && g.kind === 'one' && !g.moved) { g.held = true; tensionOn(); } }, HOLD_MS);
   } else if (pts.size === 2) {
     endOne(false);
     const t = two(); g = { kind: 'two', ...t, last: t };
@@ -242,6 +321,7 @@ canvas.addEventListener('pointermove', (e) => {
     if (Math.hypot(p.x - p.x0, p.y - p.y0) > TAP_MOVE) { g.moved = true; clearTimeout(g.holdTimer); }
     if (!g.moved) return;
     if (mode === 'camera') { if (g.pan) { score.pan(dx, dy); flash('move'); } else { score.orbit(dx, dy); flash('turn'); } return; }
+    if (mode === 'lights') { if (!g.held) { if (Math.abs(dx) >= Math.abs(dy)) lightBy('hue', dx / window.innerWidth * 1.2); else lightBy('bright', -dy / window.innerHeight * 1.4); } return; }
     if (g.held) { flash('tension'); return; }      // holding: the tension, not a slide
     if (selected >= 0) {
       // One finger on a part: colour left and right; more or less up and down, heard from the next bar.
@@ -253,12 +333,15 @@ canvas.addEventListener('pointermove', (e) => {
     } else {
       // The whole song: drag down — the breakdown, while held.
       const ddy = p.y - p.y0, ddx = p.x - p.x0;
-      if (!g.down && ddy > 60 && ddy > Math.abs(ddx) * 1.3) { g.down = true; if (playing) M.breakdown(nowBeat()); }
+      if (!g.down && ddy > 60 && ddy > Math.abs(ddx) * 1.3) { g.down = true; breakOn(); }
       if (g.down) flash('break');
     }
   } else if (g.kind === 'two' && pts.size === 2) {
     const t = two(), L = g.last;
-    if (mode === 'camera') {
+    if (mode === 'lights') {
+      let da = t.ang - L.ang; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+      if (Math.abs(da) * 60 > Math.abs(t.d - L.d) / 2) lightBy('turn', da * 1.5); else lightBy('beam', Math.log2(t.d / Math.max(1, L.d)) * 0.9);
+    } else if (mode === 'camera') {
       score.pinch(t.d / Math.max(1, L.d)); score.pan(t.cx - L.cx, t.cy - L.cy);
       if (Math.abs(t.d - L.d) > Math.hypot(t.cx - L.cx, t.cy - L.cy)) flash('zoom'); else flash('move');
     } else {
@@ -272,7 +355,7 @@ canvas.addEventListener('pointermove', (e) => {
       // Which of the three the fingers are doing most: that line lights.
       const push = Math.abs(t.cy - L.cy) / 3, twist = Math.abs(da) * 60, spread = Math.abs(t.d - L.d) / 2;
       const most = push > twist && push > spread ? 'drive' : twist > spread ? 'echo' : 'space';
-      if (Math.max(push, twist, spread) > 0.3) flash(selected < 0 ? 'signal' : most);
+      if (Math.max(push, twist, spread) > 0.3) { flash(selected < 0 ? 'signal' : most); markSignal(most); }
     }
     g.last = t;
   }
@@ -281,13 +364,14 @@ function endOne(asTap, e) {
   if (!g || g.kind !== 'one') return;
   clearTimeout(g.holdTimer);
   if (mode === 'camera') { score.hold(false); if (g.moved && !g.pan && performance.now() - g.lastT < 90) score.fling(g.vx, g.vy); }   // a finger that stopped before lifting does not fling
-  if (g.held && selected >= 0) { tensionHeld[selected] = false; tensionDropAt[selected] = (Math.floor(now / M.BAR) + 1) * M.BAR; }   // let go: back in on the next bar's one
-  if (g.down && playing) M.drop(nowBeat());
+  if (g.held) { tensionOff(); chaseOff(); }       // let go: back in on the next bar's one; the chase stops
+  if (g.down) breakOff();
   if (asTap && e) {
     const p = pts.get(e.pointerId);
     const dx = e.clientX - p.x0, dy = e.clientY - p.y0, dur = performance.now() - g.t0;
     if (!g.moved && dur < TAP_MS) tap(e.clientX, e.clientY);
-    else if (mode === 'music' && selected < 0 && playing && Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && dur < 700) { M.grow(nowBeat()); flash('grow'); }   // the next section, a slow growth
+    else if (mode === 'lights' && dur < 320 && Math.abs(dx) > 80 && Math.abs(dx) > Math.abs(dy) * 1.5) { light.hue = g.hue0; light.bright = g.bright0; scene(dx > 0 ? 1 : -1); }   // a flick: the next or previous scene
+    else if (mode === 'music' && selected < 0 && playing && Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && dur < 700) { if (dx > 0) growNow(); else ungrowNow(); }   // right: grow · left: ungrow
   }
   g = null;
 }
@@ -309,12 +393,18 @@ function tap(x, y) {
   const dbl = t - lastTap.t < 320 && Math.hypot(x - lastTap.x, y - lastTap.y) < 40;
   lastTap = { t: dbl ? 0 : t, x, y };
   if (mode === 'camera') { if (dbl) { shotNext = (shot + 1) % 4; flash('shot'); } return; }   // the next shot, landing on the next bar
+  if (mode === 'lights') {
+    if (!playing) return;
+    const hit = score.pick(x, y), part = hit && hit.staff ? M.CHANNELS.indexOf(hit.staff) : -1;
+    if (dbl) { spot(lastSpot); blackout(); return; }   // the first tap's spot undone; the blackout
+    lastSpot = part; spot(part); return;
+  }
   if (!playing) return;
   // An offered chord?
   if (selected === M.CHORDS_PART && choices) {
     for (let i = 0; i < choices.chords.length; i++) {
       const s = score.screenOf({ choice: i });
-      if (s && Math.hypot(x - s.x, y - s.y) < 36) { M.pickChord(choices.bar, choices.names[i]); flash('next'); return; }
+      if (s && Math.hypot(x - s.x, y - s.y) < 36) { chordPick(i); return; }
     }
   }
   const hit = score.pick(x, y);
@@ -333,6 +423,7 @@ canvas.addEventListener('wheel', (e) => {
   const px = e.deltaMode === 1 ? 16 : 1;           // lines to pixels
   let dx = e.deltaX * px, dy = e.deltaY * px;
   if (mode === 'camera') { score.pinch(Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.0015))); flash('zoom'); return; }
+  if (mode === 'lights') { if (e.ctrlKey || e.altKey) lightBy('beam', -dy * (e.ctrlKey ? 0.01 : 0.002)); else lightBy('turn', (Math.abs(dx) > Math.abs(dy) ? dx : dy) * 0.004); return; }
   if (e.ctrlKey || e.altKey) { signalBy('space', -dy * (e.ctrlKey ? 0.01 : 0.002)); return; }
   if (e.shiftKey && !dx) { dx = dy; dy = 0; }
   if (Math.abs(dx) > Math.abs(dy)) signalBy('echo', dx * 0.002); else signalBy('drive', -dy * 0.002);
@@ -352,17 +443,18 @@ window.addEventListener('keydown', (e) => {
   if (!playing) return;
   if (k === 'Tab') return toggleMode();
   if (mode === 'camera') { if (k === 'n') nextShot(); return; }
+  if (mode === 'lights') { if (k >= '1' && k <= '8') spot(+k - 1); if (k === ' ') chaseOn(); if (k === 'b') blackout(); if (k === '[') scene(-1); if (k === ']') scene(1); return; }
   if (k >= '1' && k <= '8') return select(+k - 1);
   if (k === 'Escape') return back();
   if (k === ' ') return tensionOn();
   if (k === 'n') { chordStep(1); chordPick(); return; }
   const signal = keys.has('d') || keys.has('e') || keys.has('s');
-  if (selected < 0 && !signal) { if (k === 'ArrowRight') growNow(); if (k === 'ArrowDown') breakOn(); }
+  if (selected < 0 && !signal) { if (k === 'ArrowRight') growNow(); if (k === 'ArrowLeft') ungrowNow(); if (k === 'ArrowDown') breakOn(); }
 });
 window.addEventListener('keyup', (e) => {
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   keys.delete(k);
-  if (k === ' ') tensionOff();
+  if (k === ' ') { tensionOff(); chaseOff(); }
   if (k === 'ArrowDown') breakOff();
 });
 window.addEventListener('blur', () => { keys.clear(); tensionOff(); breakOff(); });
@@ -374,6 +466,12 @@ function keysFrame(dt) {
     if (ax || ay) { if (keys.has('Shift')) { score.pan(-ax * 420 * dt, ay * 420 * dt); flash('move'); } else { score.orbit(ax * 260 * dt, -ay * 200 * dt); flash('turn'); } }
     const z = (keys.has('+') || keys.has('=') ? 1 : 0) - (keys.has('-') ? 1 : 0);
     if (z) { score.pinch(Math.exp(z * 1.2 * dt)); flash('zoom'); }
+    return;
+  }
+  if (mode === 'lights') {
+    if (ax) lightBy('hue', ax * 0.5 * dt); if (ay) lightBy('bright', ay * 0.5 * dt);
+    const tq = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0), bw = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
+    if (tq) lightBy('turn', tq * 1.4 * dt); if (bw) lightBy('beam', bw * 0.6 * dt);
     return;
   }
   const which = keys.has('d') ? 'drive' : keys.has('e') ? 'echo' : keys.has('s') ? 'space' : null;
@@ -398,7 +496,16 @@ function padFrame(dt) {
   else if (edge(9) || (edge(0) && !playing)) $('play').click();   // Options, or ✕ while stopped (Marco: *"X should also work"*)
   if (playing) {
     if (edge(17)) toggleMode();
-    if (mode === 'camera') {
+    if (mode === 'lights') {
+      if (lx) lightBy('hue', lx * 0.5 * dt); if (ly) lightBy('bright', -ly * 0.5 * dt);
+      if (rx) lightBy('turn', rx * 1.6 * dt); if (ry) lightBy('beam', -ry * 0.6 * dt);
+      if (edge(4)) { light.cursor = light.cursor <= 0 ? M.NP - 1 : light.cursor - 1; flash('spot'); }
+      if (edge(5)) { light.cursor = (light.cursor + 1) % M.NP; flash('spot'); }
+      if (edge(0) && light.cursor >= 0) spot(light.cursor);
+      if (edge(2)) chaseOn(); if (rel(2)) chaseOff();
+      if (edge(3)) blackout();
+      if (edge(14)) scene(-1); if (edge(15)) scene(1);
+    } else if (mode === 'camera') {
       if (lx || ly) { score.orbit(lx * 320 * dt, ly * 240 * dt); flash('turn'); }
       if (rx || ry) { score.pan(-rx * 480 * dt, -ry * 480 * dt); flash('move'); }
       const z = val(7) - val(6);
@@ -418,10 +525,10 @@ function padFrame(dt) {
       if (rx) signalBy('echo', rx * 0.6 * dt);
       if (ry) signalBy('space', -ry * 0.6 * dt);
       const r2 = val(7);                           // drive by how far R2 is pressed; let go, it goes back
-      if (r2 > 0.02 || r2Was > 0.02) { for (const q of targets()) drive[q] = r2; flash(selected < 0 ? 'drive' : 'drive'); }
+      if (r2 > 0.02 || r2Was > 0.02) { for (const q of targets()) drive[q] = r2; flash('drive'); markSignal('drive'); }
       r2Was = r2;
-      if (edge(14)) chordStep(-1);
-      if (edge(15)) chordStep(1);
+      if (choices) { if (edge(14)) chordStep(-1); if (edge(15)) chordStep(1); }
+      else if (selected < 0) { if (edge(14)) ungrowNow(); if (edge(15)) growNow(); }   // the whole score: d-pad ← ungrow, → grow
       if (edge(0)) chordPick();
     }
   }
@@ -452,10 +559,11 @@ function tick(t) {
   const bar = Math.floor(now / M.BAR);
   keysFrame(dt); padFrame(dt);
   drawGuide();
-  if (ready() && !playBtnOn) { playBtnOn = true; $('play').classList.add('on'); }   // PLAY lights last — the machine is ready (docs/02 §2)
+  if (ready() && !playBtnOn) { playBtnOn = true; $('play').classList.add('on'); if (fsOk) $('full').classList.add('on'); }   // PLAY lights last — the machine is ready (docs/02 §2)
   // A shot asked for lands on the next bar (docs/01 §5); stopped, at once.
   if (shotNext != null && (!playing || now - bar * M.BAR < dt / SPB * 1.5 || shotNext === 0)) { shot = shotNext; shotNext = null; }
   if (shotNext != null && playing) { const into = now / M.BAR - bar; if (into < 0.05) { shot = shotNext; shotNext = null; } }
+  if (blackAt != null && now >= blackAt) { light.black = !light.black; blackAt = null; }   // the blackout lands on the bar
   // Hold: the part rises while held; let go, it falls back on the next bar's one.
   for (let p = 0; p < M.NP; p++) {
     if (tensionHeld[p]) tension[p] = Math.min(1, tension[p] + dt / 6);
@@ -474,10 +582,11 @@ function tick(t) {
     now: now * 4, rate: M.BPM / 60 * 4, playing, hold: !playing, lead: playing && lead < 1 ? lead : null,
     events: playing ? scoreEvents(M.events(Math.max(0, now - 10), now + 44)) : [],
     level: (p) => (playing ? M.levelOf(p, now) : 0), off: (p) => playing && M.levelOf(p, now) === 0,
-    lights: { key: started && playing, spots: false, ball: false, disco: false },
+    lights: { key: started && playing, spots: playing, ball: playing && light.ball, disco: playing && light.disco },
+    light, swell: playing ? M.swellAt(now) : 0, drop: playing ? Math.max(0, 1 - (now / M.BAR - M.enterOf(0)) / 0.5) * (now / M.BAR >= M.enterOf(0) ? 1 : 0) : 0,
     boot: boot(), started, camMode: mode === 'camera', shot, tilt: mode === 'camera' ? tilt : { x: 0, y: 0 },
     selected, focus: mode === 'music' && selected >= 0, home: mode === 'music' && selected >= 0,
-    ...heardHand(), repeats: 0.55, choices,
+    ...heardHand(), repeats: 0.55, choices, marks, clock: clockT,
   }, dt);
 }
 requestAnimationFrame(frame);

@@ -517,6 +517,14 @@ export function createScore({ canvas }) {
   STAVES.forEach((st, s) => sticker(`name${s}`, bigText(st.name, `600 ${HELV}`, 400), 1.15, 6.6, 12));
   STAVES.forEach((st, s) => sticker(`short${s}`, text(st.short, `600 ${HELV}`, 200), 0.8, 4, 16));   // 03
   // 05: the title printed on the page, as a model name on a machine (docs/02 §1), in Marco's title font.
+  // 05: THE MARKS — what the hand did, written into the score where it is heard (Marco, 2026-10-04: *"results of actions
+  // must drop in the score"*): dynamics in bold italic, words in italic, a fermata, the chords' names.
+  const italic = (str, weight, size) => Object.assign((g, W, H) => { g.font = `italic ${weight} ${size}px ${SERIF}`; g.textBaseline = 'alphabetic'; g.fillText(str, 60, H - 200); }, { W: 1600, H: 640 });
+  for (const [k, str] of [['dim', 'dim.'], ['subito', 'subito'], ['atempo', 'a tempo'], ['eco', 'eco'], ['spazio', 'spazio']]) sticker(`mk:${k}`, italic(str, 400, 260), 2.4, 20, 40);
+  for (const [k, str] of [['f', 'f'], ['ff', 'ff']]) sticker(`mk:${k}`, italic(str, 700, 320), 3.2, 10, 40);
+  sticker('mk:accent', (g) => { g.lineWidth = 34; g.lineJoin = 'miter'; g.beginPath(); g.moveTo(80, 150); g.lineTo(330, 260); g.lineTo(80, 370); g.stroke(); }, 1.8, 5, 40);
+  sticker('mk:fermata', (g) => { g.lineWidth = 30; g.beginPath(); g.arc(256, 380, 180, Math.PI, 0); g.stroke(); g.beginPath(); g.arc(256, 345, 32, 0, Math.PI * 2); g.fill(); }, 2.6, 7, 40);
+  for (const n of ['Am9', 'Fmaj7', 'Dm9', 'Em7', 'Cmaj7', 'G6']) sticker(`mk:ch:${n}`, Object.assign(text(n, `600 ${HELV}`, 260), { W: 1600, H: 640 }), 2.4, 20, 12);
   sticker('title', bigText('05', `700 "HelveticaNeue-CondensedBold", "Helvetica Neue", "Arial Narrow", ${HELV}`, 600), 4.2, 20, 2);
 
   // The glow: flat light around a lit head, and the paper's sparks.
@@ -771,6 +779,10 @@ export function createScore({ canvas }) {
 
   // ─── Each frame ─────────────────────────────────────────────────────────────────────────────────
 
+  // 05: THE LIGHTS as played (docs/01 §17), eased toward what the hand asks: colour (warm 0 → cool 1), brightness,
+  // turn (the key light round the score, radians), beam (narrow 0 → wide 1), blackout (1 dark).
+  const LS = { hue: 0.15, bright: 0.6, turn: 0, beam: 0.5, black: 0 };
+  const WARM = new THREE.Color(0xffc488), COOL = new THREE.Color(0x9cc2ff), _kc = new THREE.Color(), _ko = new THREE.Vector3();
   const dimS = STAVES.map(() => 1);               // 05: each staff's light, 1 full, dimmed while another is selected
   const held = new Array(NP).fill(0);              // the level each part was last heard at
   let playFade = 0, rise = 0, risen = 0, spotX = null, first = true;
@@ -942,7 +954,7 @@ export function createScore({ canvas }) {
             if (te > now || amp < 0.02) break;
             const age = (now - te) / rate, v = b0 * amp * Math.exp(-age / (0.2 + 0.5 * fadeOf(h.part)));
             if (v < 0.004) continue;
-            glow(P(te), posU(s, h.pos), 0.35, _lamp, v * 1.5, 2.6);
+            glow(P(te) - k * 0.5, posU(s, h.pos), 0.35 + k * 0.9, _lamp, v * 1.5, 2.6 + k * 0.4);   // 05: each repeat rising into the dark, drifting back
             lit.push({ p: P(te), u: posU(s, h.pos), L: v * 0.8, part: h.part });
           }
         }
@@ -995,6 +1007,45 @@ export function createScore({ canvas }) {
     });
 
 
+    // 05: THE MARKS, dropping into the score (docs/01 §16): each written above its staff — or above the first staff, for
+    // the whole song — at the bar where it is heard; it drops onto the paper in half a second, warm, and settles to ink.
+    const clock = view.clock || 0, _mk = new THREE.Color(), _mg = new THREE.Color();
+    for (const m of view.marks || []) {
+      const p0 = P(m.at);
+      if (p0 < CP - 90 || p0 > pEnd + 2) continue;
+      const age = Math.max(0, clock - m.born), land = 1 - Math.min(1, age / 0.5), y0 = 3.5 * land * land;
+      const s = m.staff >= 0 ? STAFF_OF[m.staff] : 0, top = posU(s, 8) + 1.1 + (m.staff < 0 ? 1.4 : 0);
+      _mk.copy(PAPER).lerp(INK, Math.min(1, age / 0.25) * (m.staff >= 0 ? (dimOf(s) < 1 ? 0.5 : 1) : 1));
+      const warm = Math.max(0, 1 - age / 1.6) * 0.9, glowC = warm > 0.01 ? _mg.copy(LAMP_OPEN).multiplyScalar(warm) : null;
+      const ref = { what: 'mark', staff: s, part: -1, t: m.at };
+      const word = (name, p, u) => { const st = stickers[name]; if (st) put(st.b, p - st.pad, u - st.pad, st.w, st.h, 0.2, _mk, glowC, ref, 0, y0); return st; };
+      if (m.kind === 'cresc' || m.kind === 'decresc') {
+        const L = Math.max(1, P(m.to) - p0), w = 1.3, uc = top + 1.2;
+        if (m.kind === 'cresc') { put(box, p0, uc, L, 0.22, 0.08, _mk, glowC, ref, w, y0); put(box, p0, uc, L, 0.22, 0.08, _mk, glowC, ref, -w, y0); }
+        else { put(box, p0, uc + w, L, 0.22, 0.08, _mk, glowC, ref, -w, y0); put(box, p0, uc - w, L, 0.22, 0.08, _mk, glowC, ref, w, y0); }
+      } else if (m.kind === 'eco' || m.kind === 'spazio') {
+        const st = word(`mk:${m.kind}`, p0, top + 0.2), L = Math.max(1, P(m.to) - p0), u = top + 0.2 + (st ? st.inkH : 1) + 0.5;
+        put(box, p0, u, L, 0.18, 0.06, _mk, glowC, ref, 0, y0);
+        put(box, p0, u - 0.8, 0.18, 0.8, 0.06, _mk, glowC, ref, 0, y0); put(box, p0 + L - 0.18, u - 0.8, 0.18, 0.8, 0.06, _mk, glowC, ref, 0, y0);
+      } else if (m.kind === 'drive') {
+        const st = word(m.text === 'ff' ? 'mk:ff' : 'mk:f', p0, posU(s, 0) - 2.6);
+        word('mk:accent', p0 + (st ? st.inkW : 1) + 0.6, top);
+      } else if (m.kind === 'chord') word(`mk:ch:${m.text}`, p0, top + 0.2);
+      else word(`mk:${m.kind}`, p0, top + 0.2);   // dim · subito · fermata · atempo
+    }
+
+    // 05: THE SIGNAL AS LIGHT, above the score (Marco: *"spatial signal ... in a spatial layer above the score"*): over each
+    // staff at now — space a haze, wider and softer as it opens; drive the air glowing hotter and shimmering. (Echo: its
+    // copies rise into the dark, below.)
+    STAVES.forEach((st, s) => {
+      const p = st.parts[0], lv = bright(p);
+      if (lv < 0.02) return;
+      lampOf(p, _lamp);
+      const sp = per('space', p, 0.25), dr = per('drive', p, 0), u = posU(s, 4);
+      for (let i = 0; i < 5; i++) glow(CP + (i - 1) * 7, u, 2.2 + i * 0.5 + sp * 2, _lamp, 0.07 * sp * lv, 8 + 22 * sp);
+      if (dr > 0.02) for (let i = 0; i < 8; i++) glow(CP - 2 + Math.random() * 14, u + (Math.random() - 0.5) * 3, 1 + Math.random() * 2.5, HOT, 0.3 * dr * lv * (0.4 + 0.6 * Math.random()), 2 + 2 * dr);
+    });
+
     // 05: THE STANDBY LIGHT — red in standby, green once switched on; a small pool of its light on the paper.
     worldOf(LED_P, LED_U, 0.16, led.position);
     led.material.color.copy(bt < 0 ? LED_RED : LED_GREEN).multiplyScalar(1.4);
@@ -1043,7 +1094,7 @@ export function createScore({ canvas }) {
       if (!x) { l.intensity = 0; return; }
       worldOf(x.p, x.u, 2.6, l.position);           // higher: a wider pool (was 1.3)
       lampOf(x.part, l.color);
-      l.intensity = x.L * 60 * lightsOn.lamps;      // was 12
+      l.intensity = x.L * 60 * lightsOn.lamps * (1 - LS.black);   // was 12; 05: blackout takes them too
     });
 
     // The paper: the vinyl's grain is the hiss, heard while it plays.
@@ -1184,6 +1235,18 @@ export function createScore({ canvas }) {
     key.position.lerpVectors(spotA, spotB, r);
     key.target.position.set(spotX + (midX - spotX) * r, 0, -10 + (atB.z + 10) * r);
     key.angle = 0.42 + 0.36 * r;
+    // 05: THE LIGHTS, played (docs/01 §17).
+    const Lw = view.light || {}, le = 1 - Math.exp(-dt / 0.35);
+    for (const k of ['hue', 'bright', 'beam']) LS[k] += ((Lw[k] ?? LS[k]) - LS[k]) * le;
+    LS.turn += ((Lw.turn ?? 0) - LS.turn) * (1 - Math.exp(-dt / 0.6));
+    LS.black += ((Lw.black ? 1 : 0) - LS.black) * (1 - Math.exp(-dt / 0.12));
+    _ko.copy(key.position).sub(key.target.position).applyAxisAngle(_up, LS.turn);   // turned round the score
+    key.position.copy(key.target.position).add(_ko);
+    key.angle = Math.min(1.2, key.angle * (0.45 + 1.1 * LS.beam)); key.penumbra = 0.5 + 0.45 * LS.beam;
+    key.color.copy(WARM).lerp(COOL, LS.hue);
+    const beatPh = ((view.now || 0) / 4) % 1, chase = Lw.chase && playing ? 1 + 0.9 * Math.exp(-beatPh * 7) : 1;
+    // Left alone, the lights follow the music: the swell lights the room up into the kick; the drop flashes.
+    const lightMul = (0.2 + 1.6 * LS.bright) * (1 + 1.4 * (view.swell || 0)) * (1 + 2.5 * (view.drop || 0)) * (1 - LS.black) * chase;
     // THE REVEAL (Marco, 2026-10-03: *"do a light reveal of the score"*): the page opens dark and the
     // light comes up over it, slowly at first.
     if (view.powered !== false) revealT += dt;      // the launch's light waits for POWER ON
@@ -1192,7 +1255,7 @@ export function createScore({ canvas }) {
     // The key light comes in slowly and eased (Marco, 2026-10-04): 3 s from PLAY, slow in, slow out.
     keyT = want.key === false ? 0 : Math.min(KEY_IN, keyT + dt);
     if (want.key !== false) lightsOn.key = easeIO(keyT / KEY_IN);
-    key.intensity = (1.7 + 0.6 * r) * lightsOn.key;          // §45: lower, the wash the page is read by
+    key.intensity = (1.7 + 0.6 * r) * lightsOn.key * lightMul;   // §45: lower, the wash the page is read by; 05: as played
     key.target.updateMatrixWorld();
     // The spots: each as its channel is heard, a lift from each hit; CUE holds the others to a third;
     // the selected one narrower and brighter. After the reveal they come up one by one, top to bottom.
@@ -1204,10 +1267,14 @@ export function createScore({ canvas }) {
       const on = smooth(Math.max(0, Math.min(1, (revealT - REVEAL_WAIT - REVEAL_S + 0.4 - s * 0.22) / 0.6)));
       let lv = staffOff(s) ? 0 : Math.max(0, Math.min(1, held[p] / 0.75)) + 0.5 * hit[s];
       if (anyCue) lv = st.parts.some(cueOf) ? 1 : lv / 3;
+      // 05: a spot is on only where the hand put it; the chase runs one staff a beat; the cursor shows where ✕ lands.
+      if (Lw.spots) lv = (Lw.spots[p] ? 0.55 + 0.5 * hit[s] : 0) + (Lw.chase && playing && Math.floor((view.now || 0) / 4) % STAVES.length === s ? 1.2 * Math.exp(-beatPh * 4) : 0) + (Lw.cursor === p ? 0.25 : 0);
+      lv *= 1 - LS.black;
       spotLv[s] += (lv - spotLv[s]) * (1 - Math.exp(-dt / 0.08));
       const r = sel ? 5.6 : 6.4;                     // on its staff at now (Marco: not angled, not into the future)
       l.position.set(x, 0.03, -3); l.scale.set(r, 1, r);
-      l.material.opacity = Math.min(1, 0.45 * spotLv[s] * (sel ? 1.3 : 1) * on * lightsOn.spots);
+      l.material.opacity = Math.min(1, 0.45 * spotLv[s] * (sel ? 1.3 : 1) * (view.boot != null ? 1 : on) * lightsOn.spots);
+      l.material.color.copy(WARM).lerp(COOL, LS.hue).lerp(_kc.set(0xffffff), 0.5);
     });
     // The mirror ball: from high over the middle of the page, its pattern turning once in 24 s.
     const th = revealT * (2 * Math.PI / 24);

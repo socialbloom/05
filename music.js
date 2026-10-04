@@ -56,6 +56,7 @@ const RAMP = [0, 8, 8, 8, 8, 0, 8, 8];
 const SWELL = 8;                                  // bars of swell before the kick
 const OPEN_BY = 96;                               // the bar the colours are fully open by
 let enter = ENTER.slice(), swell = { from: ENTER[0] - SWELL, bars: SWELL };
+let leaving = new Array(ENTER.length).fill(null);   // the bar a part began to go out (ungrow), or null
 export const swellOf = () => ({ ...swell });
 export const enterOf = (p) => enter[p];
 
@@ -68,7 +69,7 @@ const fresh = () => ({
 let history = [{ bar: 0, s: fresh() }];           // [{ bar, s }] — the state from that bar on
 const chordPick = new Map();                      // chord-change bar → the chord chosen there
 
-export function reset() { history = [{ bar: 0, s: fresh() }]; chordPick.clear(); enter = ENTER.slice(); swell = { from: ENTER[0] - SWELL, bars: SWELL }; }
+export function reset() { history = [{ bar: 0, s: fresh() }]; chordPick.clear(); enter = ENTER.slice(); swell = { from: ENTER[0] - SWELL, bars: SWELL }; leaving.fill(null); }
 function stateAt(bar) { let s = history[0].s; for (const h of history) if (h.bar <= bar) s = h.s; return s; }
 const nextBar = (beat) => Math.floor(beat / BAR + 1e-6) + 1;
 // A change from the next bar on: copies the state there, lets `f` change it, keeps the later ones in step.
@@ -97,6 +98,23 @@ export function grow(beat) {
   if (part == null) return null;
   if (part === 0) { if (swell.from < nb) return null; swell = { from: nb, bars: 4 }; enter[0] = nb + 4; }   // into the swell, shorter
   else enter[part] = nb;
+  leaving[part] = null;
+  return part;
+}
+
+// UNGROW — the song a step back (Marco, 2026-10-04: *"swipe left to ungrow"*): the part that came in last goes out
+// over eight bars, thinning as it came in; it and every part still to come move later by as much, so it comes in
+// again on its own, eight bars after it has gone. The kick goes back behind its swell, which plays again. The dub
+// chord stays: the song can go back to the chord alone, not further. Returns the part, or null.
+export function ungrow(beat) {
+  const nb = nextBar(beat), bar = nb - 1;
+  let part = null;
+  for (let p = 0; p < NP; p++) if (enter[p] > 0 && enter[p] <= bar && leaving[p] == null && (part == null || enter[p] > enter[part])) part = p;
+  if (part == null) return null;
+  const from = enter[part], back = nb + 16 - from;   // out over 8 bars, 8 bars quiet, then in again
+  for (let p = 0; p < NP; p++) if (enter[p] >= from) enter[p] += back;
+  if (part === 0 || enter[0] >= from + back) swell = { from: enter[0] - SWELL, bars: SWELL };
+  leaving[part] = nb;
   return part;
 }
 
@@ -118,10 +136,13 @@ export const pickedAt = (bar) => chordPick.get(bar) ?? null;
 // ─── How loud each part is, 0–1 — for the score's light, as a meter would read it ───────────────
 
 const rampOf = (p, b) => (RAMP[p] ? Math.min(1, 0.15 + Math.max(0, b - enter[p]) / RAMP[p]) : 1);
+// Going out (ungrow): from full to nothing over eight bars.
+const outOf = (p, b) => (leaving[p] != null && b >= leaving[p] && b < leaving[p] + 8 ? 1 - (b - leaving[p]) / 8 : 0);
+const present = (p, bar) => bar >= enter[p] || outOf(p, bar) > 0;
 export function levelOf(part, beat) {
   const bar = Math.floor(beat / BAR), s = stateAt(bar);
-  if (bar < enter[part] || thinned(s, part, bar)) return 0;
-  return 0.85 * rampOf(part, beat / BAR);
+  if (!present(part, bar) || thinned(s, part, bar)) return 0;
+  return 0.85 * (bar >= enter[part] ? rampOf(part, beat / BAR) : outOf(part, beat / BAR));
 }
 // THE SONG'S OWN COLOUR, 0–1, by which the hand's colour is heard: dark at the start, opening very slowly; the
 // swell opens it fast; after the kick it goes on opening, fully open by OPEN_BY.
@@ -146,8 +167,8 @@ export function rng(seed) { let x = seed >>> 0 || 1; return () => ((x = (x * 168
 function barOf(bar) {
   const s = stateAt(bar), ch = chordOfBar(bar), next = chordOfBar(bar + 1), out = [];
   const add = (part, step, midi, dur, vel, kind) => out.push({ part, at: step * STEP, midi, dur, vel, kind });
-  const plays = (p) => bar >= enter[p] && !thinned(s, p, bar);
-  const growing = (p) => rampOf(p, bar + 1);
+  const plays = (p) => present(p, bar) && !thinned(s, p, bar);
+  const growing = (p) => (bar >= enter[p] ? rampOf(p, bar + 1) : outOf(p, bar));
   const m = (p) => s.more[p] * growing(p);        // a part coming in plays little, then more
   const r = rng(bar * 7919 + 11);
 
